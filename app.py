@@ -5,17 +5,18 @@ import concurrent.futures
 import os
 import random
 import re
-import dns.resolver
+import time
 
 app = Flask(__name__)
 
 # ============================================
-# الإعدادات
+# الإعدادات - نفس الكود الأصلي
 # ============================================
-MAX_WORKERS = 50
+MAX_WORKERS = 100
 SOCKET_TIMEOUT = 10
+REQUEST_DELAY = 0.05
 
-# خوادم MX متعددة (سيتم تجربة كل منها)
+# خوادم MX - نفس الكود الأصلي
 MX_SERVERS = [
     'gmail-smtp-in.l.google.com',
     'alt1.gmail-smtp-in.l.google.com',
@@ -24,7 +25,86 @@ MX_SERVERS = [
     'alt4.gmail-smtp-in.l.google.com'
 ]
 
-# قالب HTML (نفس القالب السابق مع تعديل بسيط)
+# ============================================
+# دالة الفحص - نفس الكود الأصلي
+# ============================================
+def verify_email(email, mx_server):
+    """فحص حساب واحد - نفس الكود الأصلي"""
+    server = None
+    try:
+        server = smtplib.SMTP(timeout=SOCKET_TIMEOUT)
+        server.connect(mx_server, 25)
+        server.helo('gmail.com')
+        server.mail('verify@gmail.com')
+        
+        code, message = server.rcpt(email)
+        server.quit()
+        
+        if code == 250:
+            return 'live'
+        elif code == 550:
+            msg = str(message).lower()
+            if 'disabled' in msg or 'user disabled' in msg:
+                return 'disabled'
+            else:
+                return 'invalid'
+        else:
+            return 'error'
+    except Exception as e:
+        return 'error'
+    finally:
+        if server:
+            try:
+                server.quit()
+            except:
+                pass
+
+def verify_email_with_retry(email):
+    """فحص حساب مع إعادة المحاولة على خوادم MX مختلفة"""
+    for mx_server in MX_SERVERS:
+        result = verify_email(email, mx_server)
+        if result != 'error':
+            return result
+        time.sleep(0.1)
+    return 'error'
+
+def verify_emails_batch(emails):
+    """فحص مجموعة من الإيميلات"""
+    results = {
+        'live': [],
+        'disabled': [],
+        'errors': [],
+        'live_count': 0,
+        'disabled_count': 0,
+        'error_count': 0,
+        'total': len(emails)
+    }
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_email = {executor.submit(verify_email_with_retry, email): email for email in emails}
+        
+        for future in concurrent.futures.as_completed(future_to_email):
+            email = future_to_email[future]
+            try:
+                status = future.result(timeout=15)
+                if status == 'live':
+                    results['live'].append(email)
+                    results['live_count'] += 1
+                elif status == 'disabled':
+                    results['disabled'].append(email)
+                    results['disabled_count'] += 1
+                else:
+                    results['errors'].append(email)
+                    results['error_count'] += 1
+            except Exception:
+                results['errors'].append(email)
+                results['error_count'] += 1
+    
+    return results
+
+# ============================================
+# قالب HTML
+# ============================================
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -40,10 +120,7 @@ HTML_TEMPLATE = '''
             min-height: 100vh;
             padding: 20px;
         }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
+        .container { max-width: 1200px; margin: 0 auto; }
         .header {
             background: white;
             border-radius: 20px;
@@ -242,12 +319,10 @@ HTML_TEMPLATE = '''
             document.getElementById('progress').classList.add('show');
             document.getElementById('results').style.display = 'none';
             
-            // تحديث شريط التقدم
             let progress = 0;
             progressInterval = setInterval(() => {
                 progress = Math.min(progress + 5, 90);
                 document.getElementById('progressFill').style.width = progress + '%';
-                document.getElementById('progressText').innerHTML = `جاري فحص ${Math.floor(progress * emails.length / 100)} من ${emails.length} حسابات...`;
             }, 1000);
 
             try {
@@ -305,68 +380,9 @@ HTML_TEMPLATE = '''
 </html>
 '''
 
-def verify_email_with_multiple_servers(email):
-    """فحص حساب باستخدام خوادم MX متعددة"""
-    
-    for mx_server in MX_SERVERS:
-        try:
-            # إنشاء اتصال جديد لكل خادم
-            server = smtplib.SMTP(timeout=SOCKET_TIMEOUT)
-            server.connect(mx_server, 25)
-            server.helo('verify-domain.com')
-            server.mail('checker@verify-domain.com')
-            
-            code, message = server.rcpt(email)
-            server.quit()
-            
-            if code == 250:
-                return 'live'
-            elif code == 550:
-                msg = str(message).lower()
-                if 'disabled' in msg or 'user disabled' in msg or 'does not exist' in msg:
-                    return 'disabled'
-                return 'invalid'
-            else:
-                continue  # جرب الخادم التالي
-                
-        except Exception as e:
-            continue  # جرب الخادم التالي
-    
-    return 'error'
-
-def verify_emails_batch(emails):
-    """فحص مجموعة من الإيميلات"""
-    results = {
-        'live': [],
-        'disabled': [],
-        'errors': [],
-        'live_count': 0,
-        'disabled_count': 0,
-        'error_count': 0,
-        'total': len(emails)
-    }
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_email = {executor.submit(verify_email_with_multiple_servers, email): email for email in emails}
-        
-        for future in concurrent.futures.as_completed(future_to_email):
-            email = future_to_email[future]
-            try:
-                status = future.result(timeout=15)
-                if status == 'live':
-                    results['live'].append(email)
-                    results['live_count'] += 1
-                elif status == 'disabled':
-                    results['disabled'].append(email)
-                    results['disabled_count'] += 1
-                else:
-                    results['errors'].append(email)
-                    results['error_count'] += 1
-            except Exception:
-                results['errors'].append(email)
-                results['error_count'] += 1
-    
-    return results
+# ============================================
+# Routes
+# ============================================
 
 @app.route('/')
 def home():
@@ -381,7 +397,7 @@ def verify():
     clean_emails = []
     for email in emails:
         email = email.strip().lower()
-        if email and '@gmail.com' in email and re.match(r'^[a-z0-9._%+-]+@gmail\.com$', email):
+        if email and '@gmail.com' in email:
             clean_emails.append(email)
     
     if not clean_emails:
