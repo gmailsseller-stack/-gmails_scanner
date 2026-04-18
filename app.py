@@ -1,25 +1,21 @@
-from flask import Flask, request, render_template_string, jsonify, session
+from flask import Flask, request, render_template_string, jsonify
 import smtplib
-import dns.resolver
 import socket
 import concurrent.futures
-import threading
-import time
-import re
-from datetime import datetime
 import os
+import random
+import re
+import dns.resolver
 
 app = Flask(__name__)
-app.secret_key = 'gmail_verifier_secret_key_2024'
 
 # ============================================
 # الإعدادات
 # ============================================
-MAX_WORKERS = 100
-SOCKET_TIMEOUT = 5
-REQUEST_DELAY = 0.05
+MAX_WORKERS = 50
+SOCKET_TIMEOUT = 10
 
-# خوادم MX لجيميل
+# خوادم MX متعددة (سيتم تجربة كل منها)
 MX_SERVERS = [
     'gmail-smtp-in.l.google.com',
     'alt1.gmail-smtp-in.l.google.com',
@@ -28,9 +24,7 @@ MX_SERVERS = [
     'alt4.gmail-smtp-in.l.google.com'
 ]
 
-# ============================================
-# قالب HTML
-# ============================================
+# قالب HTML (نفس القالب السابق مع تعديل بسيط)
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -58,14 +52,8 @@ HTML_TEMPLATE = '''
             text-align: center;
             box-shadow: 0 10px 30px rgba(0,0,0,0.2);
         }
-        h1 {
-            color: #333;
-            margin-bottom: 10px;
-        }
-        .subtitle {
-            color: #666;
-            font-size: 14px;
-        }
+        h1 { color: #333; margin-bottom: 10px; }
+        .subtitle { color: #666; font-size: 14px; }
         .main-card {
             background: white;
             border-radius: 20px;
@@ -73,15 +61,8 @@ HTML_TEMPLATE = '''
             margin-bottom: 20px;
             box-shadow: 0 10px 30px rgba(0,0,0,0.2);
         }
-        .input-area {
-            margin-bottom: 20px;
-        }
-        label {
-            display: block;
-            margin-bottom: 10px;
-            font-weight: bold;
-            color: #333;
-        }
+        .input-area { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 10px; font-weight: bold; color: #333; }
         textarea {
             width: 100%;
             padding: 15px;
@@ -93,15 +74,8 @@ HTML_TEMPLATE = '''
             direction: ltr;
             text-align: left;
         }
-        textarea:focus {
-            outline: none;
-            border-color: #667eea;
-        }
-        .example {
-            font-size: 12px;
-            color: #888;
-            margin-top: 5px;
-        }
+        textarea:focus { outline: none; border-color: #667eea; }
+        .example { font-size: 12px; color: #888; margin-top: 5px; }
         button {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
@@ -114,27 +88,17 @@ HTML_TEMPLATE = '''
             margin-top: 10px;
         }
         button:hover { transform: scale(1.02); }
-        button:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-        }
-        .results {
-            margin-top: 30px;
-        }
+        button:disabled { opacity: 0.6; cursor: not-allowed; }
+        .results { margin-top: 30px; }
         .result-section {
             background: #f8f9fa;
             border-radius: 15px;
             padding: 20px;
             margin-bottom: 20px;
         }
-        .result-section h3 {
-            margin-bottom: 15px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid;
-        }
-        .live-section h3 { color: #28a745; border-bottom-color: #28a745; }
-        .disabled-section h3 { color: #dc3545; border-bottom-color: #dc3545; }
-        .error-section h3 { color: #ffc107; border-bottom-color: #ffc107; }
+        .live-section h3 { color: #28a745; border-bottom: 2px solid #28a745; padding-bottom: 10px; margin-bottom: 15px; }
+        .disabled-section h3 { color: #dc3545; border-bottom: 2px solid #dc3545; padding-bottom: 10px; margin-bottom: 15px; }
+        .error-section h3 { color: #ffc107; border-bottom: 2px solid #ffc107; padding-bottom: 10px; margin-bottom: 15px; }
         .stats {
             display: flex;
             gap: 15px;
@@ -150,14 +114,7 @@ HTML_TEMPLATE = '''
             min-width: 100px;
             box-shadow: 0 2px 5px rgba(0,0,0,0.1);
         }
-        .stat-number {
-            font-size: 28px;
-            font-weight: bold;
-        }
-        .stat-label {
-            font-size: 12px;
-            color: #666;
-        }
+        .stat-number { font-size: 28px; font-weight: bold; }
         .live-number { color: #28a745; }
         .disabled-number { color: #dc3545; }
         .error-number { color: #ffc107; }
@@ -170,17 +127,9 @@ HTML_TEMPLATE = '''
             padding: 10px;
             border-radius: 8px;
         }
-        .email-item {
-            padding: 5px;
-            border-bottom: 1px solid #eee;
-        }
-        .progress {
-            display: none;
-            margin-top: 20px;
-        }
-        .progress.show {
-            display: block;
-        }
+        .email-item { padding: 5px; border-bottom: 1px solid #eee; }
+        .progress { display: none; margin-top: 20px; }
+        .progress.show { display: block; }
         .progress-bar {
             width: 100%;
             height: 20px;
@@ -193,12 +142,6 @@ HTML_TEMPLATE = '''
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             width: 0%;
             transition: width 0.3s;
-        }
-        .progress-text {
-            text-align: center;
-            margin-top: 10px;
-            font-size: 12px;
-            color: #666;
         }
         .loading {
             display: inline-block;
@@ -215,12 +158,16 @@ HTML_TEMPLATE = '''
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
-        footer {
-            text-align: center;
+        .note {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 10px;
+            padding: 10px;
+            margin-top: 15px;
             font-size: 12px;
-            color: rgba(255,255,255,0.7);
-            margin-top: 20px;
+            color: #856404;
         }
+        footer { text-align: center; font-size: 12px; color: rgba(255,255,255,0.7); margin-top: 20px; }
     </style>
 </head>
 <body>
@@ -233,7 +180,7 @@ HTML_TEMPLATE = '''
         <div class="main-card">
             <div class="input-area">
                 <label>📧 أدخل حسابات Gmail (حساب واحد في كل سطر)</label>
-                <textarea id="emailsInput" rows="10" placeholder="example1@gmail.com&#10;example2@gmail.com&#10;example3@gmail.com"></textarea>
+                <textarea id="emailsInput" rows="8" placeholder="example1@gmail.com&#10;example2@gmail.com&#10;example3@gmail.com"></textarea>
                 <div class="example">💡 مثال: username@gmail.com</div>
             </div>
 
@@ -245,22 +192,26 @@ HTML_TEMPLATE = '''
                 </div>
                 <div class="progress-text" id="progressText">جاري الفحص...</div>
             </div>
+            
+            <div class="note">
+                💡 ملاحظة: الفحص يعمل عبر خوادم Google. قد يستغرق كل حساب 2-5 ثوانٍ.
+            </div>
         </div>
 
         <div class="results" id="results" style="display: none;">
             <div class="stats" id="stats"></div>
             
-            <div class="result-section live-section" id="liveSection">
+            <div class="result-section live-section">
                 <h3>✅ الحسابات النشطة (Live)</h3>
                 <div class="email-list" id="liveList"></div>
             </div>
 
-            <div class="result-section disabled-section" id="disabledSection">
+            <div class="result-section disabled-section">
                 <h3>❌ الحسابات المعطلة (Disabled)</h3>
                 <div class="email-list" id="disabledList"></div>
             </div>
 
-            <div class="result-section error-section" id="errorSection">
+            <div class="result-section error-section">
                 <h3>⚠️ حسابات خطأ / غير موجودة</h3>
                 <div class="email-list" id="errorList"></div>
             </div>
@@ -270,6 +221,8 @@ HTML_TEMPLATE = '''
     </div>
 
     <script>
+        let progressInterval;
+        
         async function startVerification() {
             const emailsInput = document.getElementById('emailsInput').value;
             if (!emailsInput.trim()) {
@@ -288,15 +241,33 @@ HTML_TEMPLATE = '''
             document.getElementById('verifyBtn').innerHTML = '<span class="loading"></span> جاري الفحص...';
             document.getElementById('progress').classList.add('show');
             document.getElementById('results').style.display = 'none';
+            
+            // تحديث شريط التقدم
+            let progress = 0;
+            progressInterval = setInterval(() => {
+                progress = Math.min(progress + 5, 90);
+                document.getElementById('progressFill').style.width = progress + '%';
+                document.getElementById('progressText').innerHTML = `جاري فحص ${Math.floor(progress * emails.length / 100)} من ${emails.length} حسابات...`;
+            }, 1000);
 
-            const response = await fetch('/verify', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ emails: emails })
-            });
-
-            const result = await response.json();
-            displayResults(result);
+            try {
+                const response = await fetch('/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ emails: emails })
+                });
+                
+                const result = await response.json();
+                clearInterval(progressInterval);
+                document.getElementById('progressFill').style.width = '100%';
+                setTimeout(() => displayResults(result), 500);
+            } catch (error) {
+                clearInterval(progressInterval);
+                alert('حدث خطأ في الاتصال بالخادم');
+                document.getElementById('verifyBtn').disabled = false;
+                document.getElementById('verifyBtn').innerHTML = '🔎 بدء الفحص';
+                document.getElementById('progress').classList.remove('show');
+            }
         }
 
         function displayResults(result) {
@@ -305,7 +276,6 @@ HTML_TEMPLATE = '''
             document.getElementById('progress').classList.remove('show');
             document.getElementById('results').style.display = 'block';
 
-            // الإحصائيات
             const statsHtml = `
                 <div class="stat-card">
                     <div class="stat-number live-number">${result.live_count}</div>
@@ -326,60 +296,43 @@ HTML_TEMPLATE = '''
             `;
             document.getElementById('stats').innerHTML = statsHtml;
 
-            // الحسابات النشطة
-            const liveHtml = result.live.map(email => `<div class="email-item">✅ ${email}</div>`).join('');
-            document.getElementById('liveList').innerHTML = liveHtml || '<div class="email-item">لا توجد حسابات نشطة</div>';
-            document.getElementById('liveSection').style.display = result.live.length > 0 ? 'block' : 'none';
-
-            // الحسابات المعطلة
-            const disabledHtml = result.disabled.map(email => `<div class="email-item">❌ ${email}</div>`).join('');
-            document.getElementById('disabledList').innerHTML = disabledHtml || '<div class="email-item">لا توجد حسابات معطلة</div>';
-            document.getElementById('disabledSection').style.display = result.disabled.length > 0 ? 'block' : 'none';
-
-            // الأخطاء
-            const errorHtml = result.errors.map(email => `<div class="email-item">⚠️ ${email}</div>`).join('');
-            document.getElementById('errorList').innerHTML = errorHtml || '<div class="email-item">لا توجد أخطاء</div>';
-            document.getElementById('errorSection').style.display = result.errors.length > 0 ? 'block' : 'none';
+            document.getElementById('liveList').innerHTML = result.live.map(e => `<div class="email-item">✅ ${e}</div>`).join('') || '<div class="email-item">لا توجد حسابات نشطة</div>';
+            document.getElementById('disabledList').innerHTML = result.disabled.map(e => `<div class="email-item">❌ ${e}</div>`).join('') || '<div class="email-item">لا توجد حسابات معطلة</div>';
+            document.getElementById('errorList').innerHTML = result.errors.map(e => `<div class="email-item">⚠️ ${e}</div>`).join('') || '<div class="email-item">لا توجد أخطاء</div>';
         }
     </script>
 </body>
 </html>
 '''
 
-# ============================================
-# دوال الفحص
-# ============================================
-
-def verify_email(email, mx_server):
-    """فحص حساب واحد"""
-    server = None
-    try:
-        server = smtplib.SMTP(timeout=SOCKET_TIMEOUT)
-        server.connect(mx_server, 25)
-        server.helo('gmail.com')
-        server.mail('verify@gmail.com')
-
-        code, message = server.rcpt(email)
-        server.quit()
-
-        if code == 250:
-            return 'live'
-        elif code == 550:
-            msg = str(message).lower()
-            if 'disabled' in msg or 'user disabled' in msg:
-                return 'disabled'
-            else:
+def verify_email_with_multiple_servers(email):
+    """فحص حساب باستخدام خوادم MX متعددة"""
+    
+    for mx_server in MX_SERVERS:
+        try:
+            # إنشاء اتصال جديد لكل خادم
+            server = smtplib.SMTP(timeout=SOCKET_TIMEOUT)
+            server.connect(mx_server, 25)
+            server.helo('verify-domain.com')
+            server.mail('checker@verify-domain.com')
+            
+            code, message = server.rcpt(email)
+            server.quit()
+            
+            if code == 250:
+                return 'live'
+            elif code == 550:
+                msg = str(message).lower()
+                if 'disabled' in msg or 'user disabled' in msg or 'does not exist' in msg:
+                    return 'disabled'
                 return 'invalid'
-        else:
-            return 'error'
-    except Exception as e:
-        return 'error'
-    finally:
-        if server:
-            try:
-                server.quit()
-            except:
-                pass
+            else:
+                continue  # جرب الخادم التالي
+                
+        except Exception as e:
+            continue  # جرب الخادم التالي
+    
+    return 'error'
 
 def verify_emails_batch(emails):
     """فحص مجموعة من الإيميلات"""
@@ -394,16 +347,12 @@ def verify_emails_batch(emails):
     }
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {}
-        for email in emails:
-            mx_server = MX_SERVERS[0]  # استخدام الخادم الأول
-            future = executor.submit(verify_email, email, mx_server)
-            futures[future] = email
+        future_to_email = {executor.submit(verify_email_with_multiple_servers, email): email for email in emails}
         
-        for future in concurrent.futures.as_completed(futures):
-            email = futures[future]
+        for future in concurrent.futures.as_completed(future_to_email):
+            email = future_to_email[future]
             try:
-                status = future.result(timeout=10)
+                status = future.result(timeout=15)
                 if status == 'live':
                     results['live'].append(email)
                     results['live_count'] += 1
@@ -419,10 +368,6 @@ def verify_emails_batch(emails):
     
     return results
 
-# ============================================
-# Routes
-# ============================================
-
 @app.route('/')
 def home():
     return render_template_string(HTML_TEMPLATE)
@@ -436,7 +381,7 @@ def verify():
     clean_emails = []
     for email in emails:
         email = email.strip().lower()
-        if email and '@gmail.com' in email:
+        if email and '@gmail.com' in email and re.match(r'^[a-z0-9._%+-]+@gmail\.com$', email):
             clean_emails.append(email)
     
     if not clean_emails:
